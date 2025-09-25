@@ -18,8 +18,9 @@ Vector quantization is common in deep models, yet its hard assignments block gra
 Create the environment by passing the following in your terminal in the following order.
 
 ```bash
-conda create --name vqvae_comp python=3.9.19
+conda env create -f env_vqvae.yaml
 conda activate vqvae_comp
+pip install torch==1.13.0+cu117 torchvision==0.14.0+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 ```
 
 # VQGAN Generation
@@ -45,8 +46,9 @@ conda activate vqvae_comp
 Create the environment by passing the following in your terminal in the following order.
 
 ```bash
-conda create --name vqvae_comp python=3.9.19
-conda activate vqvae_comp
+conda env create -f env_vqgan.yaml
+conda activate vqgan_gen
+pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu124
 ```
 # License
 
