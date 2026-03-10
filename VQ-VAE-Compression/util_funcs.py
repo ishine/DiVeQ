@@ -19,29 +19,6 @@ def cbr_new(codebooks_used, codebooks, num_batches, discarding_threshold, eps, e
 
     return codebooks_used, codebooks
 
-def cbr_old(codebooks_used, codebooks, num_batches, discarding_threshold, eps, embedding_dim):
-        with torch.no_grad():
-            unused_indices = torch.where((codebooks_used.cpu() / num_batches) < discarding_threshold)[0]
-            used_indices = torch.where((codebooks_used.cpu() / num_batches) >= discarding_threshold)[0]
-
-            unused_count = unused_indices.shape[0]
-            used_count = used_indices.shape[0]
-
-            used = codebooks[used_indices].clone()
-            if used_count < unused_count:
-                used_codebooks = used.repeat(int((unused_count / (used_count + eps)) + 1), 1)
-                used_codebooks = used_codebooks[torch.randperm(used_codebooks.shape[0])]
-            else:
-                used_codebooks = used
-
-            codebooks[unused_indices] *= 0
-            codebooks[unused_indices] += used_codebooks[range(unused_count)] + eps * torch.randn((unused_count, embedding_dim), device=used_codebooks.device).clone()
-
-            print(f'\n************* Replaced ' + str(unused_count) + f' codewords *************')
-            codebooks_used[:] = 0
-
-        return codebooks_used, codebooks
-
 
 def set_temperature(epoch, max_epoch=100, start_temp=1.0, min_temp=0.1):
     """

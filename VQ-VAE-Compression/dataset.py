@@ -5,10 +5,9 @@ from PIL import Image
 import numpy as np
 
 
-
-class DatasetNew(Dataset):
+class Dataset_Custom(Dataset):
     def __init__(self, args):
-        self.root_dir = args.path
+        self.root_dir = args.data_path
 
         self.transform = transforms.Compose(
             [
