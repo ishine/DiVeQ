@@ -8,7 +8,6 @@ import argparse
 from tqdm import tqdm
 import os
 from lpips import LPIPS
-from util_funcs import set_temperature
 from torchvision import utils as vutils
 
 from model import Encoder, Decoder
@@ -166,8 +165,15 @@ model = Model(num_hiddens, num_residual_layers, num_residual_hiddens, num_embedd
 optimizer = optim.Adam(model.parameters(), lr=args.lr, amsgrad=False)
 scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
 
-model.train()
+def set_temperature(epoch_idx, max_epoch=100, start_temp=1.0, min_temp=0.1):
+    """
+    Sets temperature based on exponential decay from start_temp to min_temp over max_epoch.
+    """
+    decay_rate = (min_temp / start_temp) ** (1.0 / max_epoch)
+    temperature = max(start_temp * (decay_rate ** epoch_idx), min_temp)
+    return temperature
 
+model.train()
 # ---------------- Training Loop ----------------
 for epoch in range(args.epochs):
 
