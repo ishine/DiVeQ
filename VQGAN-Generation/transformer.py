@@ -8,15 +8,14 @@ class VQGANTransformer(nn.Module):
     def __init__(self, args):
         super(VQGANTransformer, self).__init__()
 
-        self.sfvq_dithered_inference = args.sfvq_dithered_inference
         self.codebook_optimization = args.codebook_optimization
-        if self.sfvq_dithered_inference:
-            self.vocab_size = int(2 ** args.bitrate) - 1
+        if self.codebook_optimization in ['sfdiveq', 'sfdiveq_detach']:
+            # Since we map on the space-filling curve, we consider each line segment as a codeword
+            # For a codebook of size K, the number of line segments is K-1.
+            self.vocab_size = int(2 ** args.codebook_bits) - 1
         else:
-            self.vocab_size = int(2 ** args.bitrate)
-
+            self.vocab_size = int(2 ** args.codebook_bits)
         self.sos_token = args.sos_token
-
         self.vqgan = self.load_vqgan(args)
 
         transformer_config = {
@@ -39,25 +38,22 @@ class VQGANTransformer(nn.Module):
 
     @torch.no_grad()
     def encode_to_z(self, x):
-        x_embedding = self.vqgan.encode(x)
-        if self.sfvq_dithered_inference:
-            quant_z, indices = self.vqgan.vq.dithered_inference(x_embedding)
+        if self.codebook_optimization in ['sfdiveq', 'sfdiveq_detach']:
+            quantized, _, indices_for_transformer = self.vqgan.encode(x)
+            indices = indices_for_transformer.view(quantized.shape[0], -1)
         else:
-            quant_z, indices = self.vqgan.vq.inference(x_embedding)
-        indices = indices.view(quant_z.shape[0], -1)
-        return quant_z, indices
+            quantized, indices = self.vqgan.encode(x)
+            indices = indices.view(quantized.shape[0], -1)
+        return quantized, indices
 
     @torch.no_grad()
     def z_to_image(self, indices, p1=16, p2=16):
-        if self.sfvq_dithered_inference:
-            ix_to_vectors = self.vqgan.vq.get_random_dithered_codebook(indices.flatten()).reshape(indices.shape[0], p1, p2, 256)
+        if self.codebook_optimization in ['sfdiveq', 'sfdiveq_detach']:
+            ix_to_vectors = self.vqgan.vq._sample_dithered_codebook(indices.flatten()).reshape(indices.shape[0], p1, p2, 256)
+        elif self.codebook_optimization in ['ema', 'gumbel_softmax']:
+            ix_to_vectors = self.vqgan.vq.codebook.weight.data[indices.flatten()].reshape(indices.shape[0], p1, p2, 256)
         else:
-            if self.codebook_optimization == 'ema':
-                ix_to_vectors = self.vqgan.vq._embedding.weight.data[indices.flatten()].reshape(indices.shape[0], p1, p2, 256)
-            elif self.codebook_optimization == 'gumbel_softmax':
-                ix_to_vectors = self.vqgan.vq.codebook.weight.data[indices.flatten()].reshape(indices.shape[0], p1, p2, 256)
-            else:
-                ix_to_vectors = self.vqgan.vq.codebook[indices.flatten()].reshape(indices.shape[0], p1, p2, 256)
+            ix_to_vectors = self.vqgan.vq.codebook[indices.flatten()].reshape(indices.shape[0], p1, p2, 256)
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
         image = self.vqgan.decode(ix_to_vectors)
         return image

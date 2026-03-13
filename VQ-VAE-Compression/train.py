@@ -31,12 +31,12 @@ parser.add_argument("--lr", type=float, default=5.5e-04)
 parser.add_argument('--codebook_bits', type=int, default=10,
                     help='number of bits per codebook. No. of codewords in the codebook'
                          ' equals to 2^codebook_bits')
-parser.add_argument("--codebook_optimization", type=str, default='residual_sfdiveq',
+parser.add_argument("--codebook_optimization", type=str, default='diveq',
                     help='method to optimize VQ codebook: options -> "ste", "ema", "rt",'
                          ' "gumbel_softmax", "nsvq", "diveq", "sfdiveq", "diveq_detach",'
                          ' "sfdiveq_detach", "residual_diveq", "residual_sfdiveq",'
                          ' "product_diveq", "product_sfdiveq" ')
-parser.add_argument("--num_codebooks", type=int, default=3,
+parser.add_argument("--num_codebooks", type=int, default=4,
                     help="No. of codebooks used for Residual VQ or Product VQ")
 parser.add_argument('--device', type=str, default="cuda")
 parser.add_argument("--data_path", type=str, help="path to training set directory")
@@ -45,7 +45,6 @@ args = parser.parse_args()
 
 # path to dataset directory
 args.data_path = r"path/to/dataset/directory"
-# args.data_path = r"/l/datasets/afhq512/train/"
 
 # ---------------- Creating the VQ-VAE model ----------------
 class Model(nn.Module):
@@ -140,7 +139,6 @@ class Model(nn.Module):
             return x_recon
 
 # ---------------- Some configurations for the model and optimizer ----------------
-dataset_name = 'afhq'
 num_hiddens = 256
 num_residual_hiddens = 128
 num_residual_layers = 6

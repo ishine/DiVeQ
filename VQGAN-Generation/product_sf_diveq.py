@@ -1,0 +1,449 @@
+import torch
+import torch.nn as nn
+from torch.distributions import normal
+import warnings
+from typing import Tuple
+import math
+
+class ProductSFDIVEQ(nn.Module):
+    """
+    Product_SF-DiVeQ: Differentiable Space-Filling Product Vector Quantization (PVQ)
+    module that allows end-to-end training of VQ-based models without any auxiliary
+    losses or hyperparameter tunings. The module does not need codebook replacement,
+    because its training strategy inherently pulls all codewords inside the latent
+    space. The module uses a custom initialization such that it applies Product_DiVeQ
+    for the first `skip_iters` iterations, and then it initializes the codebooks by the
+    recent latent vectors and starts Product_SF-DiVeQ.
+
+    Args:
+        - num_embeddings (int): Codebook size (No. of codewords).
+        - embedding_dim (int): Dimensionality of embeddings.
+        - num_codebooks (int): No. of codebooks involved in quantization.
+        - noise_var (float): Variance of the directional noise in SF-DiVeQ.
+            Recommended noise_var < 1e-2.
+        - skip_iters (int): Number of training iterations to skip quantization for
+            SF-DiVeQ custom initialization. Recommended skip_iters > 1000.
+        - avg_iters (int): Number of last training iterations to extract continuous
+            latents for SF-DiVeQ custom codebook initialization, before starting
+            quantization. Recommended  50 < avg_iters < 100.
+        - replacement_iters (int): Replacement interval (number of training iterations
+            to apply codebook replacement before starting Product_SF-DiVeQ).
+            Recommended 50 < replacement_iters < 100.
+        - discard_threshold (float): Threshold to discard the codebook entries that are
+            used less than this threshold after "replacement_iters" iteration.
+            Recommended 0.01 < discard_threshold < 0.05.
+        - perturb_eps (float): Adjusts perturbation/shift magnitude from used codewords
+            during codebook replacement.
+        - uniform_init (bool): Whether to use uniform initialization.
+        - allow_warning (bool): Whether to print the warnings.
+        - verbose (bool): Whether to print codebook replacement status.
+        - latents_on_cpu (bool): Whether to collect latents for initialization on cpu.
+            If running out of CUDA memory, set it to True.
+
+    Returns:
+        - z_q (torch.Tensor): Differentiable quantized input/latent. shape (N, D)
+        - indices_list (list of torch.Tensor): List of selected codebook indices for
+            each individual codebook. length = num_codebooks
+        - perplexity_list (list of float): List of codebooks perplexity (average
+            codebook usage). length = num_codebooks
+    """
+    def __init__(
+            self,
+            num_embeddings: int,
+            embedding_dim: int,
+            num_codebooks: int,
+            noise_var: float = 0.001,
+            skip_iters: int = 1000,
+            avg_iters: int = 50,
+            replacement_iters: int = 100,
+            discard_threshold: float = 0.01,
+            perturb_eps: float = 1e-9,
+            uniform_init: bool = True,
+            allow_warning: bool = True,
+            verbose = True,
+            latents_on_cpu = False,
+    ):
+        super().__init__()
+
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.num_codebooks = num_codebooks
+        self.noise_var = noise_var
+        self.skip_iters = skip_iters
+        self.avg_iters = avg_iters
+        self.replacement_iters = replacement_iters
+        self.discard_threshold = discard_threshold
+        self.perturb_eps = perturb_eps
+        self.uniform_init = uniform_init
+        self.allow_warning = allow_warning
+        self.verbose = verbose
+        self.latents_on_cpu = latents_on_cpu
+
+        self._check_dimensionality()
+        self.pvq_dim = int(self.embedding_dim / self.num_codebooks)
+
+        # ---------------- User warnings ----------------
+        if allow_warning:
+            if noise_var > 0.01:
+                warnings.warn(f"`noise_var` is set to {noise_var}, which is"
+                              f" quite large. Values > 0.01 may overshoot"
+                              f" nearest-neighbor mapping.", UserWarning)
+
+            if skip_iters < 1000:
+                warnings.warn(f"`skip_iters` is set to {skip_iters}, which is"
+                              f" quite small. Set `skip_iters` to enough large values"
+                              f" that ensure the latent space has passed its initial"
+                              f" big mutations.", UserWarning)
+
+            if avg_iters < 50:
+                warnings.warn(f"`avg_iters` is set to {avg_iters}, which is"
+                              f" quite small. Values < 50 may result in a small pool of"
+                              f" latent vectors for custom initialization."
+                              f" If running out of memory (OOM), set a smaller value or"
+                              f" set `latents_on_cpu` to True.", UserWarning)
+
+            elif avg_iters > 100:
+                warnings.warn(f"`avg_iters` is set to {avg_iters}, which is"
+                              f" quite large. Values > 100 may result in an out-dated"
+                              f" pool of latent vectors for custom initialization."
+                              f" If running out of memory (OOM), set a smaller value or"
+                              f" set `latents_on_cpu` to True.", UserWarning)
+
+            if replacement_iters < 50:
+                warnings.warn(f"`replacement_iters` is set to"
+                              f" {replacement_iters}, which is quite small. Values < 50"
+                              f" may cause too early and frequent codebook"
+                              f" replacements.", UserWarning)
+
+            elif replacement_iters > 100:
+                warnings.warn(f"`replacement_iters` is set to"
+                              f" {replacement_iters}, which is quite large."
+                              f" Values > 100 may cause too late and sporadic codebook"
+                              f" replacements.", UserWarning)
+
+            if discard_threshold > 0.05:
+                warnings.warn(f"`discard_threshold` is set to"
+                              f" {discard_threshold}, which is quite large."
+                              f" Values > 0.05 may discard a portion of suitable but"
+                              f" rarely used codewords.", UserWarning)
+
+            if perturb_eps > 1e-6:
+                warnings.warn(f"`perturb_eps` is set to {perturb_eps}, which"
+                              f" is quite large. Values > 1e-6 may cause big"
+                              f" perturbation/shift from used codewords.", UserWarning)
+
+        # ---------------- Codebook initialization ----------------
+        if uniform_init:
+            codebook = torch.rand((self.num_codebooks, self.num_embeddings,
+                                   self.pvq_dim)) * (1 / self.num_embeddings)
+        else:
+            codebook = torch.randn((self.num_codebooks, self.num_embeddings,
+                                    self.pvq_dim)) * (1 / self.num_embeddings)
+
+        self.codebook = torch.nn.Parameter(codebook, requires_grad=True)
+
+        # --------- Tensors used for SF-DiVeQ custom codebook initialization ---------
+        self.register_buffer("codebook_usage", torch.zeros(self.num_codebooks,
+                                               self.num_embeddings, dtype=torch.int32))
+        self.register_buffer("iter_counter", torch.zeros(1, dtype=torch.int32))
+        self.latent_list = [[] for _ in range(self.num_codebooks)]
+
+    # ---------------- Forward pass (Core API) ----------------
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, list, list]:
+        """
+        Args:
+            - z (torch.Tensor): input/latent. shape (N, D)
+
+        Returns:
+            - z_q (torch.Tensor): Differentiable quantized input/latent. shape (N, D)
+            - indices_list (list of torch.Tensor): List of selected codebook indices for
+                each individual codebook. length = num_codebooks
+            - perplexity_list (list of float): List of codebooks perplexity (average
+                codebook usage). length = num_codebooks
+        """
+        self._check_input(z)
+
+        with torch.no_grad():
+            self.iter_counter += 1
+
+        # If iteration is larger than `skip_iters`, quantize by Product_SF-DiVeQ
+        if self.iter_counter.item() >= self.skip_iters:
+
+            quantized_input_list = []
+            indices_list = []
+            perplexity_list = []
+
+            z_split = torch.split(z, self.pvq_dim, dim=1)
+
+            for i in range(self.num_codebooks):
+                quantized_input, indices = self._hard_sfvq(z_split[i], self.codebook[i])
+
+                quantized_input_list.append(quantized_input)
+                indices_list.append(indices)
+
+                # Perplexity Computation
+                perplexity = self._compute_perplexity(indices)
+                perplexity_list.append(perplexity)
+
+            z_hard_quantized = torch.cat(quantized_input_list[:], dim=1)
+
+            # DiVeQ technique
+            direction = z_hard_quantized - z
+            random_vectors = (normal.Normal(0, self.noise_var).sample(z.shape)
+                                                            .to(z.device) + direction)
+            normalized = random_vectors / torch.linalg.norm(random_vectors, dim=1,
+                                                        keepdim=True).clamp_min(1e-12)
+            error_magnitude = torch.linalg.norm(z_hard_quantized - z, dim=1,
+                                                                        keepdim=True)
+
+            vq_error = error_magnitude * normalized.detach()
+            z_q = z + vq_error  # Differentiable quantized input
+
+            return z_q, indices_list, perplexity_list
+
+        # If iteration is smaller than `skip_iters`, quantize by Product_DiVeQ
+        else:
+            z_q, indices_list, perplexity_list = self._forward_diveq(z)
+
+            with (torch.no_grad()):
+                z_split = torch.split(z, self.pvq_dim, dim=1)
+                # to capture latents of the last `avg_iters` iterations for
+                # Product_SF-DiVeQ custom codebook initialization
+                if self.iter_counter.item() >= (self.skip_iters - self.avg_iters):
+                    for i in range(self.num_codebooks):
+                        if self.latents_on_cpu:
+                            self.latent_list[i].append(z_split[i].detach().cpu())
+                        else:
+                            self.latent_list[i].append(z_split[i].detach())
+                    # to compute and set the initial codebook
+                    if self.iter_counter.item() == (self.skip_iters - 1):
+                        for i in range(self.num_codebooks):
+                            stacked_latents = torch.cat(self.latent_list[i][:], dim=0)
+                            initial_codebook = torch.zeros((self.num_embeddings,
+                                        self.pvq_dim), device=self.latent_list[i][0]
+                                                   .device, dtype=self.codebook.dtype)
+                            hop_size = int(math.floor(stacked_latents.shape[0] /
+                                                                self.num_embeddings))
+                            for j in range(self.num_embeddings):
+                                initial_codebook[j] = torch.mean(stacked_latents[j
+                                                 * hop_size:(j + 1) * hop_size], dim=0)
+                            if self.latents_on_cpu:
+                                self.codebook[i].data = initial_codebook.to(z.device
+                                                                            ).clone()
+                            else:
+                                self.codebook[i].data = initial_codebook.clone()
+
+            return z_q, indices_list, perplexity_list
+
+    # ---------------- Quantization for Inference ----------------
+    @torch.no_grad()
+    def inference(self, z: torch.Tensor) -> Tuple[torch.Tensor, list, list]:
+        """
+        Deterministic hard quantization by mapping the input/latent to the nearest point
+        on the Product_SF-DiVeQ curve.
+        Args:
+            - z (torch.Tensor): input/latent. shape (N, D)
+
+        Returns:
+            - z_q_hard (torch.Tensor): Hard quantized input/latent. shape (N, D)
+            - indices_list (list of torch.Tensor): List of selected codebook indices for
+                each individual codebook. length = num_codebooks
+            - perplexity_list (list of float): List of codebooks perplexity (average
+                codebook usage). length = num_codebooks
+        """
+        self._check_input(z)
+
+        quantized_input_list = []
+        indices_list = []
+        perplexity_list = []
+
+        z_split = torch.split(z, self.pvq_dim, dim=1)
+
+        for i in range(self.num_codebooks):
+            quantized_input, indices, perplexity = self._dithered_inference(z_split[i],
+                                                                    self.codebook[i])
+
+            quantized_input_list.append(quantized_input)
+            indices_list.append(indices)
+            perplexity_list.append(perplexity)
+
+        z_q_hard = torch.cat(quantized_input_list[:], dim=1)
+
+        return z_q_hard, indices_list, perplexity_list
+
+    # ---------------- Utility functions ----------------
+    def _check_dimensionality(self) -> None:
+        if self.embedding_dim % self.num_codebooks != 0:
+            raise ValueError("Embedding dimension must be divisible by the"
+                             " number of codebooks.")
+
+    def _check_input(self,z: torch.Tensor) -> None:
+        if z.ndim != 2:
+            raise ValueError("Product_SF-DiVeQ input must have shape of (N, D), where"
+                             " N is the No. of input samples, and D is the"
+                             " embedding dimensionality.")
+        if z.size(1) != self.embedding_dim:
+            raise ValueError(f"Product_SF-DiVeQ input.shape[1] must match the embedding"
+                             f" dimensionality that is {self.embedding_dim}.")
+
+    def _generate_dithered_codebook(self, x: torch.Tensor, codebook: torch.Tensor) \
+                                                -> Tuple[torch.Tensor, torch.Tensor]:
+        dither = torch.rand((self.num_embeddings - 1, 1), device=x.device)
+        integer_index = torch.linspace(0, self.num_embeddings - 2,
+                               self.num_embeddings - 1, device=x.device).to(torch.int64)
+        c1 = codebook[integer_index]
+        c2 = codebook[integer_index + 1]
+        dithered_codebook = ((1 - dither) * c1) + (dither * c2)
+        return dithered_codebook, dither
+
+    def _hard_sfvq(self, x: torch.Tensor, codebook: torch.Tensor) \
+                                                -> Tuple[torch.Tensor, torch.Tensor]:
+        dithered_codebook, dither = self._generate_dithered_codebook(x, codebook)
+        # Calculate distances
+        distances = (torch.sum(x.pow(2), dim=1, keepdim=True)
+                     + torch.sum(dithered_codebook.pow(2), dim=1)
+                     - 2 * torch.matmul(x, dithered_codebook.t()))
+
+        indices = torch.argmin(distances, dim=1)
+        x_quantized = dithered_codebook[indices]
+        return x_quantized, indices
+
+    @staticmethod
+    def _hard_vq(x: torch.Tensor, codebook: torch.Tensor) \
+                                                -> Tuple[torch.Tensor, torch.Tensor]:
+        distances = (torch.sum(x.pow(2), dim=1, keepdim=True)
+                     + torch.sum(codebook.pow(2), dim=1)
+                     - 2 * torch.matmul(x, codebook.t()))
+        indices = torch.argmin(distances, dim=1)
+        x_quantized = codebook[indices]
+        return x_quantized, indices
+
+    def _forward_diveq(self, z: torch.Tensor) -> Tuple[torch.Tensor, list, list]:
+        quantized_input_list = []
+        indices_list = []
+        perplexity_list = []
+
+        z_split = torch.split(z, self.pvq_dim, dim=1)
+
+        for i in range(self.num_codebooks):
+            quantized_input, indices = self._hard_vq(z_split[i], self.codebook[i])
+
+            quantized_input_list.append(quantized_input)
+            indices_list.append(indices)
+
+            # Perplexity Computation
+            perplexity = self._compute_perplexity(indices)
+            perplexity_list.append(perplexity)
+
+            # Track used indices for codebook replacement
+            with torch.no_grad():
+                self.codebook_usage[i, indices] += 1
+
+        z_hard_quantized = torch.cat(quantized_input_list[:], dim=1)
+
+        # DiVeQ technique
+        direction = z_hard_quantized - z
+        random_vectors = (normal.Normal(0, self.noise_var).sample(z.shape)
+                                                            .to(z.device) + direction)
+        normalized = random_vectors / torch.linalg.norm(random_vectors, dim=1,
+                                                        keepdim=True).clamp_min(1e-12)
+        error_magnitude = torch.linalg.norm(z_hard_quantized - z, dim=1, keepdim=True)
+
+        vq_error = error_magnitude * normalized.detach()
+        z_q = z + vq_error  # Differentiable quantized input
+
+        # Track used indices for codebook replacement
+        with torch.no_grad():
+            if self.iter_counter.item() % self.replacement_iters == 0:
+                self._replace_unused_entries()  # Applies codebook replacement
+
+        return z_q, indices_list, perplexity_list
+
+    def _compute_perplexity(self, indices: torch.Tensor) -> float:
+        encodings = torch.zeros(indices.shape[0], self.num_embeddings,
+                                                                device=indices.device)
+        encodings.scatter_(1, indices.unsqueeze(1), 1)
+        avg_probs = torch.mean(encodings, dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+        return perplexity.item()
+
+    def _dithered_inference(self, x: torch.Tensor, codebook: torch.Tensor) \
+                                            -> Tuple[torch.Tensor, torch.Tensor, float]:
+        distances = (torch.sum(x.pow(2), dim=1, keepdim=True)
+                     + torch.sum(codebook.pow(2), dim=1)
+                     - 2.0 * torch.matmul(x, codebook.t()))
+
+        indices = torch.argmin(distances, dim=1)
+        perplexity = self._compute_perplexity(indices)
+        indices_clamped = indices.clamp(min=1, max=self.num_embeddings - 2)
+
+        cm = codebook[indices_clamped - 1]
+        cc = codebook[indices_clamped]
+        cp = codebook[indices_clamped + 1]
+
+        remainder_index_m = ((((cc - cm) * (x - cm)).sum(dim=1) / (cc - cm).square()
+                              .sum(dim=1)).unsqueeze(-1).clamp(min=0., max=1.))
+        remainder_index_p = ((((cp - cc) * (x - cc)).sum(dim=1) / (cp - cc).square()
+                              .sum(dim=1)).unsqueeze(-1).clamp(min=0., max=1.))
+
+        z_q_m = ((1 - remainder_index_m) * cm) + (remainder_index_m * cc)
+        z_q_p = ((1 - remainder_index_p) * cc) + (remainder_index_p * cp)
+        distance_m = (x - z_q_m).square().sum(dim=1)
+        distance_p = (x - z_q_p).square().sum(dim=1)
+
+        offset = (distance_p < distance_m).to(torch.int64).squeeze() - 1
+
+        c1 = codebook[indices_clamped + offset]
+        c2 = codebook[indices_clamped + offset + 1]
+
+        remainder_index = (((c2 - c1) * (x - c1)).sum(dim=1) / (c2 - c1).square()
+                           .sum(dim=1)).clamp(min=0., max=1.)
+        x_quantized = c1 + (remainder_index.reshape(-1, 1) * (c2 - c1))
+        return x_quantized, indices, perplexity
+
+
+    def _replace_unused_entries(self) -> None:
+        with torch.no_grad():
+
+            for i in range(self.num_codebooks):
+
+                usage_ratio = self.codebook_usage[i] / self.replacement_iters
+                unused_indices = torch.where(usage_ratio < self.discard_threshold)[0]
+                used_indices = torch.where(usage_ratio >= self.discard_threshold)[0]
+
+                if unused_indices.numel() == 0 or used_indices.numel() == 0:
+                    self.codebook_usage[i].zero_()
+                    continue
+
+                unused_count = unused_indices.numel()
+                used_probs = self.codebook_usage[i, used_indices] / torch.sum(
+                                                self.codebook_usage[i, used_indices])
+                randomly_sampled_indices = used_probs.multinomial(
+                                            num_samples=unused_count, replacement=True)
+                sampled_indices = used_indices[randomly_sampled_indices]
+                used_codebooks = self.codebook[i, sampled_indices].clone()
+
+                self.codebook[i, unused_indices] = (used_codebooks + self.perturb_eps
+                                            * torch.randn_like(used_codebooks)).clone()
+                self.codebook_usage[i].zero_()
+
+                if self.verbose:
+                    print("\n***** Replaced " + str(unused_count) + f" codewords of"
+                                                                    f" CB{i + 1} *****")
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_embeddings={self.num_embeddings}, "
+            f"embedding_dim={self.embedding_dim}, "
+            f"num_codebooks={self.num_codebooks}, "
+            f"noise_var={self.noise_var}, "
+            f"skip_iters={self.skip_iters}, "
+            f"avg_iters={self.avg_iters}, "
+            f"replacement_iters={self.replacement_iters}, "
+            f"discard_threshold={self.discard_threshold}, "
+            f"perturb_eps={self.perturb_eps}, "
+            f"uniform_init={self.uniform_init}, "
+            f"allow_warning={self.allow_warning}, "
+            f"verbose={self.verbose}, "
+            f"latents_on_cpu={self.latents_on_cpu}"
+        )

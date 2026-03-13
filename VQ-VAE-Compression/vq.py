@@ -694,7 +694,8 @@ class GumbelSoftmax(nn.Module):
         - verbose (bool): Whether to print codebook replacement status.
 
     Returns:
-        - z_q (torch.Tensor): Quantized input/latent. shape (N, D)
+        - z_q (torch.Tensor): Quantized input/latent. shape (B, D, H, W),
+            where B: batch size, D: embedding_dim, H,W: Latent Height and Width.
         - indices (torch.Tensor): Selected codebook indices. shape (N, )
         - perplexity (float): Codebook perplexity (average codebook usage)
         - loss (torch.Tensor): Kullback–Leibler divergence to prior loss.
@@ -773,6 +774,20 @@ class GumbelSoftmax(nn.Module):
     # ---------------- Forward pass (Core API) ----------------
     def forward(self, z: torch.Tensor) \
                             -> Tuple[torch.Tensor, torch.Tensor, float, torch.Tensor]:
+        """
+        Args:
+            - z (torch.Tensor): input/latent. shape (B, K, H, W),
+                where B: batch size, K: num_embeddings, H,W: Latent Height and Width.
+
+        Returns:
+            - z_q (torch.Tensor): Quantized input/latent. shape (B, D, H, W),
+                where B: batch size, D: embedding_dim, H,W: Latent Height and Width.
+            - indices (torch.Tensor): Selected codebook indices. shape (N, )
+            - perplexity (float): Codebook perplexity (average codebook usage).
+            - loss (torch.Tensor): Kullback–Leibler divergence to prior loss.
+        """
+
+        self._check_input(z)
 
         soft_one_hot = F.gumbel_softmax(z, tau=self.temperature, dim=1, hard=self.straight_through)
         z_q = einsum('b n h w, n d -> b d h w', soft_one_hot, self.codebook.weight)
@@ -801,10 +816,12 @@ class GumbelSoftmax(nn.Module):
         """
         Deterministic hard quantization by mapping the input to the nearest codeword.
         Args:
-            - z (torch.Tensor): input/latent. shape (N, D)
+            - z (torch.Tensor): input/latent. shape (B, K, H, W),
+                where B: batch size, K: num_embeddings, H,W: Latent Height and Width.
 
         Returns:
-            - z_q_hard (torch.Tensor): Hard quantized input/latent. shape (N, D)
+            - z_q_hard (torch.Tensor): Quantized input/latent. shape (B, D, H, W),
+                where B: batch size, D: embedding_dim, H,W: Latent Height and Width.
             - indices (torch.Tensor): Selected codebook indices. shape (N, )
             - perplexity (float): Codebook perplexity (average codebook usage).
         """
@@ -827,13 +844,13 @@ class GumbelSoftmax(nn.Module):
                              f" It must be in the range of 0 < temperature < 1.")
 
     def _check_input(self, z: torch.Tensor) -> None:
-        if z.ndim != 2:
-            raise ValueError("GumbelSoftmax input must have the shape of (N, D),"
-                             " where N is the No. of input samples,and D is the"
-                             " embedding dimensionality.")
-        if z.size(1) != self.embedding_dim:
-            raise ValueError(f"GumbelSoftmax input.shape[1] must match the embedding"
-                             f" dimensionality that is {self.embedding_dim}.")
+        if z.ndim != 4:
+            raise ValueError("GumbelSoftmax input must have the shape of (B, K, H, W),"
+                             " where B: batch size, K: num_embeddings,"
+                             " H,W: Latent Height and Width.")
+        if z.size(1) != self.num_embeddings:
+            raise ValueError(f"GumbelSoftmax input.shape[1] must match the"
+                             f" num_embeddings that is {self.num_embeddings}.")
 
     def _compute_perplexity(self, indices: torch.Tensor) -> float:
         encodings = torch.zeros(indices.shape[0], self.num_embeddings,
