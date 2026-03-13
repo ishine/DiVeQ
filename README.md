@@ -1,9 +1,9 @@
 # DiVeQ: Differentiable Vector Quantization Using the Reparameterization Trick
 
-This is the code implementation accompanying the blind submission *"DiVeQ: Differentiable Vector Quantization Using the Reparameterization Trick"*.
+This is the code implementation for the paper *"DiVeQ: Differentiable Vector Quantization Using the Reparameterization Trick"* accepted at ICLR 2026.
 
 **Abstract:**
-Vector quantization is common in deep models, yet its hard assignments block gradients and hinder end-to-end training. We propose DiVeQ, which treats quantization as adding an error vector that mimics the quantization distortion, keeping the forward pass hard while letting gradients flow. We also present a space-filling variant (SF-DiVeQ) that assigns to a curve constructed by the lines connecting codewords, resulting in less quantization error and full codebook usage. Both methods train end-to-end without requiring auxiliary losses or temperature schedules. On VQ-VAE compression and VQGAN generation across various data sets, they improve reconstruction and sample quality over alternative quantization approaches.
+Vector quantization is common in deep models, yet its hard assignments block gradients and hinder end-to-end training. We propose DiVeQ, which treats quantization as adding an error vector that mimics the quantization distortion, keeping the forward pass hard while letting gradients flow. We also present a space-filling variant (SF-DiVeQ) that assigns to a curve constructed by the lines connecting codewords, resulting in less quantization error and full codebook usage. Both methods train end-to-end without requiring auxiliary losses or temperature schedules. In VQ-VAE image compression, VQGAN image generation, and DAC speech coding tasks across various data sets, our proposed methods improve reconstruction and sample quality over alternative quantization approaches.
 
 # VQVAE Compression
 
@@ -49,6 +49,3 @@ conda create --name vqgan_gen python 3.13.3
 conda activate vqgan_gen
 pip install -r vqgan_gen_reqs.txt
 ```
-# License
-
-Upon acceptance of the paper, we plan to make the codes public on GitHub under the MIT License.
