@@ -77,4 +77,4 @@ pip install -r vqgan_gen_reqs.txt
 ```
 
 ## License
-This software is provided under the MIT License. See the accompanying [LICENSE](LICENSE) file for details.
+This software is provided under the MIT License. See the accompanying [LICENSE](LICENSE.txt) file for details.
