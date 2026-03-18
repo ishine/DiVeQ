@@ -9,6 +9,7 @@ from tqdm import tqdm
 import os
 from lpips import LPIPS
 from torchvision import utils as vutils
+import kagglehub
 
 from model import Encoder, Decoder
 from vq import STE, EMA, RT, GumbelSoftmax, NSVQ
@@ -44,7 +45,9 @@ parser.add_argument("--data_path", type=str, help="path to training set director
 args = parser.parse_args()
 
 # path to dataset directory
-args.data_path = r"path/to/dataset/directory"
+os.makedirs("data_dir", exist_ok=True)
+data_path = kagglehub.dataset_download("badasstechie/celebahq-resized-256x256", output_dir="./data_dir")
+args.data_path = os.path.join(data_path, "celeba_hq_256")
 
 # ---------------- Creating the VQ-VAE model ----------------
 class Model(nn.Module):

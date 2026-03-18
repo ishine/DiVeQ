@@ -27,14 +27,19 @@ class ProductSFDIVEQ(nn.Module):
             latents for SF-DiVeQ custom codebook initialization, before starting
             quantization. Recommended  50 < avg_iters < 100.
         - replacement_iters (int): Replacement interval (number of training iterations
-            to apply codebook replacement before starting Product_SF-DiVeQ).
-            Recommended 50 < replacement_iters < 100.
+            to apply codebook replacement before starting Residual_SF-DiVeQ).
+            Recommended 50 < replacement_iters < 100. It is recommended to set
+            `replacement_iters` at least 10-20 times smaller than `skip_iters` to
+            prevent unused codewords to be involved in custom initialization.
         - discard_threshold (float): Threshold to discard the codebook entries that are
-            used less than this threshold after "replacement_iters" iteration.
-            Recommended 0.01 < discard_threshold < 0.05.
+            used less than this threshold after "replacement_iters" iterations.
+            Recommended 0.01 < discard_threshold < 0.05. discard_threshold must be in
+            the range of [0,1] such that discard_threshold=0.01 means to discard the
+            codebook entries which are used less than 1 percent.
         - perturb_eps (float): Adjusts perturbation/shift magnitude from used codewords
-            during codebook replacement.
-        - uniform_init (bool): Whether to use uniform initialization.
+            for codebook replacement.
+        - uniform_init (bool): Whether to initialize codebook with uniform distribution.
+            If False, the codebook is initialized from a normal distribution.
         - allow_warning (bool): Whether to print the warnings.
         - verbose (bool): Whether to print codebook replacement status.
         - latents_on_cpu (bool): Whether to collect latents for initialization on cpu.
@@ -79,7 +84,7 @@ class ProductSFDIVEQ(nn.Module):
         self.verbose = verbose
         self.latents_on_cpu = latents_on_cpu
 
-        self._check_dimensionality()
+        self._check_constraints()
         self.pvq_dim = int(self.embedding_dim / self.num_codebooks)
 
         # ---------------- User warnings ----------------
@@ -272,10 +277,34 @@ class ProductSFDIVEQ(nn.Module):
         return z_q_hard, indices_list, perplexity_list
 
     # ---------------- Utility functions ----------------
-    def _check_dimensionality(self) -> None:
+    def _check_constraints(self, ) -> None:
+        if self.noise_var < 0.0:
+            raise ValueError("`noise_var` must be a positive float value. To have more"
+                             " precise nearest-neighbor assignments, it is recommended"
+                             " that noise_var < 1e-2.")
+        if self.skip_iters < 0:
+            raise ValueError("`skip_iters` must be a positive integer value."
+                             " It is recommended that skip_iters > 1000.")
+        if self.avg_iters < 0:
+            raise ValueError("`avg_iters` must be a positive integer value."
+                             " It is recommended that 50 < avg_iters < 100.")
+        if self.avg_iters > self.skip_iters:
+            raise ValueError("`avg_iters` must be smaller than `skip_iters`.")
+        if self.replacement_iters > self.skip_iters:
+            raise ValueError("`replacement_iters` must be smaller than `skip_iters`."
+                             " It is recommended to set `replacement_iters` at least"
+                             " 10-20 times smaller than `skip_iters` to prevent unused"
+                             " codewords to be involved in custom initialization.")
+        if self.replacement_iters < 0:
+            raise ValueError("`replacement_iters` must be a positive integer value."
+                             " It is recommended that 50 < replacement_iters < 300.")
+        if (self.discard_threshold < 0.0) or (self.discard_threshold > 1.0):
+            raise ValueError("`discard_threshold` must be in the range of [0,1]. It is"
+                             " recommended that 0.01 < discard_threshold < 0.05,"
+                             " such that discard_threshold=0.01 means to discard the"
+                             " codebook entries which are used less than 1 percent.")
         if self.embedding_dim % self.num_codebooks != 0:
-            raise ValueError("Embedding dimension must be divisible by the"
-                             " number of codebooks.")
+            raise ValueError("`embedding_dim` must be divisible by `num_codebooks`.")
 
     def _check_input(self,z: torch.Tensor) -> None:
         if z.ndim != 2:
