@@ -5,11 +5,69 @@ This is the code implementation for the paper [*"DiVeQ: Differentiable Vector Qu
 **Abstract:**
 Vector quantization is common in deep models, yet its hard assignments block gradients and hinder end-to-end training. We propose DiVeQ, which treats quantization as adding an error vector that mimics the quantization distortion, keeping the forward pass hard while letting gradients flow. We also present a space-filling variant (SF-DiVeQ) that assigns to a curve constructed by the lines connecting codewords, resulting in less quantization error and full codebook usage. Both methods train end-to-end without requiring auxiliary losses or temperature schedules. In VQ-VAE image compression, VQGAN image generation, and DAC speech coding tasks across various data sets, our proposed methods improve reconstruction and sample quality over alternative quantization approaches.
 
-![alt text](https://raw.githubusercontent.com/AaltoML/DiVeQ/main/diveq_teaser.png)
+![alt text](diveq_teaser.png)
 
-# VQVAE Image Compression
+# VQ-VAE Image Compression
 
-## Contents of the VQVAE Directory
+## Create the Conda Environment for VQ-VAE Compression
+
+Create the environment by passing the following in your terminal in the following order.
+
+```bash
+conda create --name vqvae_comp python=3.13.3
+conda activate vqvae_comp
+pip install -r vqvae_comp_reqs.txt
+```
+
+## Train VQ-VAE model
+
+Train the VQ-VAE model:
+
+```bash
+python train.py
+```
+
+# VQGAN Image Generation
+
+## Create the Conda Environment for VQGAN Generation
+
+Create the environment by passing the following in your terminal in the following order.
+
+```bash
+conda create --name vqgan_gen python=3.13.3
+conda activate vqgan_gen
+pip install -r vqgan_gen_reqs.txt
+```
+
+## Train VQGAN model
+
+1. Train the generator (VQ-VAE) model (first stage training):
+
+```bash
+python training_vqgan.py
+```
+
+2. Train the transformer model (second stage training):
+
+```bash
+python training_transformer.py
+```
+
+3. Sample from transformer to create new generations:
+
+```bash
+python sample_transformer.py
+```
+
+4. Compute FID metric between original data and generated samples:
+
+```bash
+python compute_fid.py
+```
+
+# Repository List of Contents
+
+## VQVAE Directory
 
 - `train.py`: code to train the VQ-VAE model
 - `model.py`: code for VQ-VAE encoder and decoder
@@ -23,19 +81,7 @@ Vector quantization is common in deep models, yet its hard assignments block gra
 - `product_sf_diveq.py`: code to optimize the codebook by Product VQ using SF-DiVeQ
 - `vq.py`: code to optimize the codebook using other VQ baseline methods
 
-## Creating the Conda Environment for VQVAE Compression
-
-Create the environment by passing the following in your terminal in the following order.
-
-```bash
-conda create --name vqvae_comp python 3.13.3
-conda activate vqvae_comp
-pip install -r vqvae_comp_reqs.txt
-```
-
-# VQGAN Image Generation
-
-## Contents of the VQGAN Directory
+## VQGAN Directory
 
 - `training_vqgan.py`: code to train the VQ-VAE model
 - `training_transformer.py`: code to train the transformer
@@ -55,15 +101,6 @@ pip install -r vqvae_comp_reqs.txt
 - `sf_diveq_detach.py`: code to optimize the codebook by Detach variant of SF-DiVeQ
 - `vq.py`: code to optimize the codebook using other VQ baseline methods
 
-## Creating the Conda Environment for VQGAN Generation
-
-Create the environment by passing the following in your terminal in the following order.
-
-```bash
-conda create --name vqgan_gen python 3.13.3
-conda activate vqgan_gen
-pip install -r vqgan_gen_reqs.txt
-```
 
 ## Citation
 
