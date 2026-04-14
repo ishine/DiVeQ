@@ -14,14 +14,9 @@ import kagglehub
 from model import Encoder, Decoder
 from vq import STE, EMA, RT, GumbelSoftmax, NSVQ
 
-from diveq import DIVEQ
-from sf_diveq import SFDIVEQ
-from residual_diveq import ResidualDIVEQ
-from residual_sf_diveq import ResidualSFDIVEQ
-from product_diveq import ProductDIVEQ
-from product_sf_diveq import ProductSFDIVEQ
-from diveq_detach import DIVEQDetach
-from sf_diveq_detach import SFDIVEQDetach
+# Importing DiVeQ modules for quantization
+from diveq import (DIVEQ, SFDIVEQ, DIVEQDetach, SFDIVEQDetach, ResidualDIVEQ,
+                                    ResidualSFDIVEQ, ProductDIVEQ, ProductSFDIVEQ)
 
 parser = argparse.ArgumentParser(description="VQVAE")
 parser.add_argument("--size", type=int, default=256, help='Image height and width')
@@ -41,16 +36,6 @@ parser.add_argument("--num_codebooks", type=int, default=4,
                     help="No. of codebooks used for Residual VQ or Product VQ")
 parser.add_argument('--device', type=str, default="cuda")
 parser.add_argument("--data_path", type=str, help="path to training set directory")
-
-args = parser.parse_args()
-
-# path to dataset directory
-os.makedirs("data_dir", exist_ok=True)
-data_path = kagglehub.dataset_download("badasstechie/celebahq-resized-256x256", output_dir="./data_dir")
-args.data_path = os.path.join(data_path, "celeba_hq_256")
-
-# device
-args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------- Creating the VQ-VAE model ----------------
 class Model(nn.Module):
@@ -144,84 +129,99 @@ class Model(nn.Module):
             x_recon = self._decoder(quantized)
             return x_recon
 
-# ---------------- Some configurations for the model and optimizer ----------------
-num_hiddens = 256
-num_residual_hiddens = 128
-num_residual_layers = 6
+def main():
 
-os.makedirs("checkpoints", exist_ok=True)
-os.makedirs(f"results/{args.codebook_optimization}", exist_ok=True)
-num_eval_samples = 5
+    args = parser.parse_args()
 
-perceptual_loss = LPIPS().eval().to(device=args.device)
+    # path to dataset directory
+    os.makedirs("data_dir", exist_ok=True)
+    data_path = kagglehub.dataset_download("badasstechie/celebahq-resized-256x256", output_dir="./data_dir")
+    args.data_path = os.path.join(data_path, "celeba_hq_256")
 
-num_embeddings = int(2**args.codebook_bits)
-milestones = [int(args.epochs*0.4), int(args.epochs*0.7)]
+    # device
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-dataset = Dataset_Custom(args)
-training_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                             num_workers=1, drop_last=True)
+    # ---------------- Some configurations for the model and optimizer ----------------
+    num_hiddens = 256
+    num_residual_hiddens = 128
+    num_residual_layers = 6
 
-# Instantiate the vq-vae model
-model = Model(num_hiddens, num_residual_layers, num_residual_hiddens, num_embeddings,
-              args.embedding_dim, args.num_codebooks, args.codebook_optimization).to(args.device)
+    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs(f"results/{args.codebook_optimization}", exist_ok=True)
+    num_eval_samples = 5
 
-optimizer = optim.Adam(model.parameters(), lr=args.lr, amsgrad=False)
-scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
+    perceptual_loss = LPIPS().eval().to(device=args.device)
 
-def set_temperature(epoch_idx, max_epoch=100, start_temp=1.0, min_temp=0.1):
-    """
-    Sets temperature based on exponential decay from start_temp to min_temp over max_epoch.
-    """
-    decay_rate = (min_temp / start_temp) ** (1.0 / max_epoch)
-    temperature = max(start_temp * (decay_rate ** epoch_idx), min_temp)
-    return temperature
+    num_embeddings = int(2**args.codebook_bits)
+    milestones = [int(args.epochs*0.4), int(args.epochs*0.7)]
 
-model.train()
-# ---------------- Training Loop ----------------
-for epoch in range(args.epochs):
+    dataset = Dataset_Custom(args)
+    training_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
+                                num_workers=1, drop_last=True)
 
-    if args.codebook_optimization == 'gumbel_softmax':
-        current_temp = set_temperature(epoch, max_epoch=args.epochs)
-        model.vq.temperature = current_temp # Temperature annealing for GumbelSoftmax
+    # Instantiate the vq-vae model
+    model = Model(num_hiddens, num_residual_layers, num_residual_hiddens, num_embeddings,
+                args.embedding_dim, args.num_codebooks, args.codebook_optimization).to(args.device)
 
-    with tqdm(range(len(training_loader))) as pbar:
-        for i, data in zip(pbar, training_loader):
-            data = data.to(args.device)
-            optimizer.zero_grad()
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, amsgrad=False)
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
 
-            data_recon, indices, perplexity, vq_loss = model(data)
+    def set_temperature(epoch_idx, max_epoch=100, start_temp=1.0, min_temp=0.1):
+        """
+        Sets temperature based on exponential decay from start_temp to min_temp over max_epoch.
+        """
+        decay_rate = (min_temp / start_temp) ** (1.0 / max_epoch)
+        temperature = max(start_temp * (decay_rate ** epoch_idx), min_temp)
+        return temperature
 
-            recon_error = F.mse_loss(data_recon, data)
-            perceptual_error = torch.mean(perceptual_loss(data, data_recon.clamp(-1,1)))
+    model.train()
+    # ---------------- Training Loop ----------------
+    for epoch in range(args.epochs):
 
-            if args.codebook_optimization in ['ste', 'ema', 'gumbel_softmax', 'rt']:
-                loss = recon_error + (1 * perceptual_error) + vq_loss
-            else:
-                loss = recon_error + (1 * perceptual_error)
+        if args.codebook_optimization == 'gumbel_softmax':
+            current_temp = set_temperature(epoch, max_epoch=args.epochs)
+            model.vq.temperature = current_temp # Temperature annealing for GumbelSoftmax
 
-            loss.backward()
+        with tqdm(range(len(training_loader))) as pbar:
+            for i, data in zip(pbar, training_loader):
+                data = data.to(args.device)
+                optimizer.zero_grad()
 
-            pbar.set_postfix(Epoch=epoch + 1, Recon_Loss=f"{recon_error.item():.6f}",
-                             Perc_Loss=f"{perceptual_error.item():.6f}",
-                             Perplexity=f"{perplexity}")
+                data_recon, indices, perplexity, vq_loss = model(data)
 
-            optimizer.step()
-            pbar.update(0)
+                recon_error = F.mse_loss(data_recon, data)
+                perceptual_error = torch.mean(perceptual_loss(data, data_recon.clamp(-1,1)))
 
-    scheduler.step() # for learning rate scheduling
+                if args.codebook_optimization in ['ste', 'ema', 'gumbel_softmax', 'rt']:
+                    loss = recon_error + (1 * perceptual_error) + vq_loss
+                else:
+                    loss = recon_error + (1 * perceptual_error)
 
-    # Visualization of reconstructed images (assumption: values of images are in the range of [-1,1])
-    with torch.no_grad():
-        images = data[0:num_eval_samples]
-        recon_images = model.inference(images)
-        concat_images = torch.cat((torch.clamp(images.add(1).mul(0.5), min=0.0, max=1.0)
-                       , torch.clamp(recon_images.add(1).mul(0.5), min=0.0, max=1.0)))
-        vutils.save_image(concat_images, os.path.join(f"results/{args.codebook_optimization}",
-                                              f"epoch{epoch + 1}.jpg"), nrow=num_eval_samples)
+                loss.backward()
 
-    # Save the model
-    if (epoch + 1) % 1 == 0:
-        torch.save(model.state_dict(),f"checkpoints/"
-              f"vqvae_{args.codebook_optimization}_epoch{str(epoch + 1)}_"
-                          f"{args.codebook_bits}bit_bs{args.batch_size}_lr{args.lr}.pt")
+                pbar.set_postfix(Epoch=epoch + 1, Recon_Loss=f"{recon_error.item():.6f}",
+                                Perc_Loss=f"{perceptual_error.item():.6f}",
+                                Perplexity=f"{perplexity}")
+
+                optimizer.step()
+                pbar.update(0)
+
+        scheduler.step() # for learning rate scheduling
+
+        # Visualization of reconstructed images (assumption: values of images are in the range of [-1,1])
+        with torch.no_grad():
+            images = data[0:num_eval_samples]
+            recon_images = model.inference(images)
+            concat_images = torch.cat((torch.clamp(images.add(1).mul(0.5), min=0.0, max=1.0)
+                        , torch.clamp(recon_images.add(1).mul(0.5), min=0.0, max=1.0)))
+            vutils.save_image(concat_images, os.path.join(f"results/{args.codebook_optimization}",
+                                                f"epoch{epoch + 1}.jpg"), nrow=num_eval_samples)
+
+        # Save the model
+        if (epoch + 1) % 1 == 0:
+            torch.save(model.state_dict(),f"checkpoints/"
+                f"vqvae_{args.codebook_optimization}_epoch{str(epoch + 1)}_"
+                            f"{args.codebook_bits}bit_bs{args.batch_size}_lr{args.lr}.pt")
+
+if __name__ == "__main__":
+    main()
